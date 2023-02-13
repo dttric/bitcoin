@@ -1,15 +1,15 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2021 The Bitcoin Core developers
+// Copyright (c) 2009-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #ifndef BITCOIN_UTIL_TIME_H
 #define BITCOIN_UTIL_TIME_H
 
-#include <compat.h>
+#include <compat/compat.h>
 
 #include <chrono>
-#include <stdint.h>
+#include <cstdint>
 #include <string>
 
 using namespace std::chrono_literals;
@@ -24,6 +24,7 @@ struct NodeClock : public std::chrono::system_clock {
 };
 using NodeSeconds = std::chrono::time_point<NodeClock, std::chrono::seconds>;
 
+using SteadyClock = std::chrono::steady_clock;
 using SteadySeconds = std::chrono::time_point<std::chrono::steady_clock, std::chrono::seconds>;
 using SteadyMilliseconds = std::chrono::time_point<std::chrono::steady_clock, std::chrono::milliseconds>;
 using SteadyMicroseconds = std::chrono::time_point<std::chrono::steady_clock, std::chrono::microseconds>;
@@ -54,7 +55,9 @@ constexpr int64_t count_seconds(std::chrono::seconds t) { return t.count(); }
 constexpr int64_t count_milliseconds(std::chrono::milliseconds t) { return t.count(); }
 constexpr int64_t count_microseconds(std::chrono::microseconds t) { return t.count(); }
 
+using HoursDouble = std::chrono::duration<double, std::chrono::hours::period>;
 using SecondsDouble = std::chrono::duration<double, std::chrono::seconds::period>;
+using MillisecondsDouble = std::chrono::duration<double, std::chrono::milliseconds::period>;
 
 /**
  * DEPRECATED
@@ -107,7 +110,6 @@ T GetTime()
  */
 std::string FormatISO8601DateTime(int64_t nTime);
 std::string FormatISO8601Date(int64_t nTime);
-int64_t ParseISO8601DateTime(const std::string& str);
 
 /**
  * Convert milliseconds to a struct timeval for e.g. select.

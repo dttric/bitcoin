@@ -1,10 +1,11 @@
-// Copyright (c) 2017-2021 The Bitcoin Core developers
+// Copyright (c) 2017-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <wallet/coinselection.h>
 
 #include <consensus/amount.h>
+#include <consensus/consensus.h>
 #include <policy/feerate.h>
 #include <util/check.h>
 #include <util/system.h>
@@ -87,13 +88,15 @@ std::optional<SelectionResult> SelectCoinsBnB(std::vector<OutputGroup>& utxo_poo
     std::vector<size_t> best_selection;
     CAmount best_waste = MAX_MONEY;
 
+    bool is_feerate_high = utxo_pool.at(0).fee > utxo_pool.at(0).long_term_fee;
+
     // Depth First search loop for choosing the UTXOs
     for (size_t curr_try = 0, utxo_pool_index = 0; curr_try < TOTAL_TRIES; ++curr_try, ++utxo_pool_index) {
         // Conditions for starting a backtrack
         bool backtrack = false;
         if (curr_value + curr_available_value < selection_target || // Cannot possibly reach target with the amount remaining in the curr_available_value.
             curr_value > selection_target + cost_of_change || // Selected value is out of range, go back and try other branch
-            (curr_waste > best_waste && (utxo_pool.at(0).fee - utxo_pool.at(0).long_term_fee) > 0)) { // Don't select things which we know will be more wasteful if the waste is increasing
+            (curr_waste > best_waste && is_feerate_high)) { // Don't select things which we know will be more wasteful if the waste is increasing
             backtrack = true;
         } else if (curr_value >= selection_target) {       // Selected value is within range
             curr_waste += (curr_value - selection_target); // This is the excess value which is added to the waste for the below comparison
@@ -156,7 +159,7 @@ std::optional<SelectionResult> SelectCoinsBnB(std::vector<OutputGroup>& utxo_poo
     for (const size_t& i : best_selection) {
         result.AddInput(utxo_pool.at(i));
     }
-    result.ComputeAndSetWaste(CAmount{0});
+    result.ComputeAndSetWaste(cost_of_change, cost_of_change, CAmount{0});
     assert(best_waste == result.GetWaste());
 
     return result;
@@ -165,6 +168,12 @@ std::optional<SelectionResult> SelectCoinsBnB(std::vector<OutputGroup>& utxo_poo
 std::optional<SelectionResult> SelectCoinsSRD(const std::vector<OutputGroup>& utxo_pool, CAmount target_value, FastRandomContext& rng)
 {
     SelectionResult result(target_value, SelectionAlgorithm::SRD);
+
+    // Include change for SRD as we want to avoid making really small change if the selection just
+    // barely meets the target. Just use the lower bound change target instead of the randomly
+    // generated one, since SRD will result in a random change amount anyway; avoid making the
+    // target needlessly large.
+    target_value += CHANGE_LOWER;
 
     std::vector<size_t> indexes;
     indexes.resize(utxo_pool.size());
@@ -348,6 +357,10 @@ void OutputGroup::Insert(const COutput& output, size_t ancestors, size_t descend
     // descendants is the count as seen from the top ancestor, not the descendants as seen from the
     // coin itself; thus, this value is counted as the max, not the sum
     m_descendants = std::max(m_descendants, descendants);
+
+    if (output.input_bytes > 0) {
+        m_weight += output.input_bytes * WITNESS_SCALE_FACTOR;
+    }
 }
 
 bool OutputGroup::EligibleForSpending(const CoinEligibilityFilter& eligibility_filter) const
@@ -389,20 +402,26 @@ CAmount GetSelectionWaste(const std::set<COutput>& inputs, CAmount change_cost, 
     return waste;
 }
 
-CAmount GenerateChangeTarget(CAmount payment_value, FastRandomContext& rng)
+CAmount GenerateChangeTarget(const CAmount payment_value, const CAmount change_fee, FastRandomContext& rng)
 {
     if (payment_value <= CHANGE_LOWER / 2) {
-        return CHANGE_LOWER;
+        return change_fee + CHANGE_LOWER;
     } else {
         // random value between 50ksat and min (payment_value * 2, 1milsat)
         const auto upper_bound = std::min(payment_value * 2, CHANGE_UPPER);
-        return rng.randrange(upper_bound - CHANGE_LOWER) + CHANGE_LOWER;
+        return change_fee + rng.randrange(upper_bound - CHANGE_LOWER) + CHANGE_LOWER;
     }
 }
 
-void SelectionResult::ComputeAndSetWaste(CAmount change_cost)
+void SelectionResult::ComputeAndSetWaste(const CAmount min_viable_change, const CAmount change_cost, const CAmount change_fee)
 {
-    m_waste = GetSelectionWaste(m_selected_inputs, change_cost, m_target, m_use_effective);
+    const CAmount change = GetChange(min_viable_change, change_fee);
+
+    if (change > 0) {
+        m_waste = GetSelectionWaste(m_selected_inputs, change_cost, m_target, m_use_effective);
+    } else {
+        m_waste = GetSelectionWaste(m_selected_inputs, 0, m_target, m_use_effective);
+    }
 }
 
 CAmount SelectionResult::GetWaste() const
@@ -415,16 +434,50 @@ CAmount SelectionResult::GetSelectedValue() const
     return std::accumulate(m_selected_inputs.cbegin(), m_selected_inputs.cend(), CAmount{0}, [](CAmount sum, const auto& coin) { return sum + coin.txout.nValue; });
 }
 
+CAmount SelectionResult::GetSelectedEffectiveValue() const
+{
+    return std::accumulate(m_selected_inputs.cbegin(), m_selected_inputs.cend(), CAmount{0}, [](CAmount sum, const auto& coin) { return sum + coin.GetEffectiveValue(); });
+}
+
 void SelectionResult::Clear()
 {
     m_selected_inputs.clear();
     m_waste.reset();
+    m_weight = 0;
 }
 
 void SelectionResult::AddInput(const OutputGroup& group)
 {
-    util::insert(m_selected_inputs, group.m_outputs);
+    // As it can fail, combine inputs first
+    InsertInputs(group.m_outputs);
     m_use_effective = !group.m_subtract_fee_outputs;
+
+    m_weight += group.m_weight;
+}
+
+void SelectionResult::AddInputs(const std::set<COutput>& inputs, bool subtract_fee_outputs)
+{
+    // As it can fail, combine inputs first
+    InsertInputs(inputs);
+    m_use_effective = !subtract_fee_outputs;
+
+    m_weight += std::accumulate(inputs.cbegin(), inputs.cend(), 0, [](int sum, const auto& coin) {
+        return sum + std::max(coin.input_bytes, 0) * WITNESS_SCALE_FACTOR;
+    });
+}
+
+void SelectionResult::Merge(const SelectionResult& other)
+{
+    // As it can fail, combine inputs first
+    InsertInputs(other.m_selected_inputs);
+
+    m_target += other.m_target;
+    m_use_effective |= other.m_use_effective;
+    if (m_algo == SelectionAlgorithm::MANUAL) {
+        m_algo = other.m_algo;
+    }
+
+    m_weight += other.m_weight;
 }
 
 const std::set<COutput>& SelectionResult::GetInputSet() const
@@ -464,4 +517,24 @@ std::string GetAlgorithmName(const SelectionAlgorithm algo)
     }
     assert(false);
 }
+
+CAmount SelectionResult::GetChange(const CAmount min_viable_change, const CAmount change_fee) const
+{
+    // change = SUM(inputs) - SUM(outputs) - fees
+    // 1) With SFFO we don't pay any fees
+    // 2) Otherwise we pay all the fees:
+    //  - input fees are covered by GetSelectedEffectiveValue()
+    //  - non_input_fee is included in m_target
+    //  - change_fee
+    const CAmount change = m_use_effective
+                           ? GetSelectedEffectiveValue() - m_target - change_fee
+                           : GetSelectedValue() - m_target;
+
+    if (change < min_viable_change) {
+        return 0;
+    }
+
+    return change;
+}
+
 } // namespace wallet

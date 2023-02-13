@@ -5,16 +5,18 @@
 #ifndef BITCOIN_KERNEL_COINSTATS_H
 #define BITCOIN_KERNEL_COINSTATS_H
 
-#include <chain.h>
-#include <coins.h>
 #include <consensus/amount.h>
 #include <streams.h>
 #include <uint256.h>
 
 #include <cstdint>
 #include <functional>
+#include <optional>
 
 class CCoinsView;
+class Coin;
+class COutPoint;
+class CScript;
 namespace node {
 class BlockManager;
 } // namespace node
@@ -70,7 +72,7 @@ struct CCoinsStats {
 
 uint64_t GetBogoSize(const CScript& script_pub_key);
 
-CDataStream TxOutSer(const COutPoint& outpoint, const Coin& coin);
+DataStream TxOutSer(const COutPoint& outpoint, const Coin& coin);
 
 std::optional<CCoinsStats> ComputeUTXOStats(CoinStatsHashType hash_type, CCoinsView* view, node::BlockManager& blockman, const std::function<void()>& interruption_point = {});
 } // namespace kernel

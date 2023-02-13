@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2017-2021 The Bitcoin Core developers
+# Copyright (c) 2017-2022 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test recovery from a crash during chainstate writing.
@@ -62,8 +62,8 @@ class ChainstateWriteCrashTest(BitcoinTestFramework):
         self.node2_args = ["-dbcrashratio=24", "-dbcache=16"] + self.base_args
 
         # Node3 is a normal node with default args, except will mine full blocks
-        # and non-standard txs (e.g. txs with "dust" outputs)
-        self.node3_args = ["-blockmaxweight=4000000", "-acceptnonstdtxn"]
+        # and txs with "dust" outputs
+        self.node3_args = ["-blockmaxweight=4000000", "-dustrelayfee=0"]
         self.extra_args = [self.node0_args, self.node1_args, self.node2_args, self.node3_args]
 
     def setup_network(self):
@@ -202,7 +202,6 @@ class ChainstateWriteCrashTest(BitcoinTestFramework):
 
     def run_test(self):
         self.wallet = MiniWallet(self.nodes[3])
-        self.wallet.rescan_utxos()
         initial_height = self.nodes[3].getblockcount()
         self.generate(self.nodes[3], COINBASE_MATURITY, sync_fun=self.no_op)
 
@@ -211,7 +210,9 @@ class ChainstateWriteCrashTest(BitcoinTestFramework):
         self.crashed_on_restart = 0      # Track count of crashes during recovery
 
         # Start by creating a lot of utxos on node3
-        utxo_list = self.wallet.send_self_transfer_multi(from_node=self.nodes[3], num_outputs=5000)['new_utxos']
+        utxo_list = []
+        for _ in range(5):
+            utxo_list.extend(self.wallet.send_self_transfer_multi(from_node=self.nodes[3], num_outputs=1000)['new_utxos'])
         self.generate(self.nodes[3], 1, sync_fun=self.no_op)
         assert_equal(len(self.nodes[3].getrawmempool()), 0)
         self.log.info(f"Prepped {len(utxo_list)} utxo entries")

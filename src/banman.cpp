@@ -1,5 +1,5 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2021 The Bitcoin Core developers
+// Copyright (c) 2009-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -31,12 +31,12 @@ void BanMan::LoadBanlist()
 
     if (m_client_interface) m_client_interface->InitMessage(_("Loading banlist…").translated);
 
-    int64_t n_start = GetTimeMillis();
+    const auto start{SteadyClock::now()};
     if (m_ban_db.Read(m_banned)) {
         SweepBanned(); // sweep out unused entries
 
         LogPrint(BCLog::NET, "Loaded %d banned node addresses/subnets  %dms\n", m_banned.size(),
-                 GetTimeMillis() - n_start);
+                 Ticks<std::chrono::milliseconds>(SteadyClock::now() - start));
     } else {
         LogPrintf("Recreating the banlist database\n");
         m_banned = {};
@@ -58,13 +58,13 @@ void BanMan::DumpBanlist()
         SetBannedSetDirty(false);
     }
 
-    int64_t n_start = GetTimeMillis();
+    const auto start{SteadyClock::now()};
     if (!m_ban_db.Write(banmap)) {
         SetBannedSetDirty(true);
     }
 
     LogPrint(BCLog::NET, "Flushed %d banned node addresses/subnets to disk  %dms\n", banmap.size(),
-             GetTimeMillis() - n_start);
+             Ticks<std::chrono::milliseconds>(SteadyClock::now() - start));
 }
 
 void BanMan::ClearBanned()

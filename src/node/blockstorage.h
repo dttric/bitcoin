@@ -1,4 +1,4 @@
-// Copyright (c) 2011-2021 The Bitcoin Core developers
+// Copyright (c) 2011-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -8,6 +8,7 @@
 #include <attributes.h>
 #include <chain.h>
 #include <fs.h>
+#include <kernel/cs_main.h>
 #include <protocol.h>
 #include <sync.h>
 #include <txdb.h>
@@ -17,8 +18,6 @@
 #include <unordered_map>
 #include <vector>
 
-extern RecursiveMutex cs_main;
-
 class ArgsManager;
 class BlockValidationState;
 class CBlock;
@@ -26,7 +25,7 @@ class CBlockFileInfo;
 class CBlockUndo;
 class CChain;
 class CChainParams;
-class CChainState;
+class Chainstate;
 class ChainstateManager;
 struct CCheckpointData;
 struct FlatFilePos;
@@ -44,12 +43,12 @@ static const unsigned int UNDOFILE_CHUNK_SIZE = 0x100000; // 1 MiB
 /** The maximum size of a blk?????.dat file (since 0.8) */
 static const unsigned int MAX_BLOCKFILE_SIZE = 0x8000000; // 128 MiB
 
+/** Size of header written by WriteBlockToDisk before a serialized CBlock */
+static constexpr size_t BLOCK_SERIALIZATION_HEADER_SIZE = CMessageHeader::MESSAGE_START_SIZE + sizeof(unsigned int);
+
 extern std::atomic_bool fImporting;
 extern std::atomic_bool fReindex;
-/** Pruning-related variables and constants */
-/** True if we're running in -prune mode. */
 extern bool fPruneMode;
-/** Number of bytes of block files that we're trying to stay below. */
 extern uint64_t nPruneTarget;
 
 // Because validation code takes pointers to the map's CBlockIndex objects, if
@@ -75,12 +74,12 @@ struct PruneLockInfo {
  * Maintains a tree of blocks (stored in `m_block_index`) which is consulted
  * to determine where the most-work tip is.
  *
- * This data is used mostly in `CChainState` - information about, e.g.,
+ * This data is used mostly in `Chainstate` - information about, e.g.,
  * candidate tips is not maintained here.
  */
 class BlockManager
 {
-    friend CChainState;
+    friend Chainstate;
     friend ChainstateManager;
 
 private:
@@ -171,7 +170,19 @@ public:
     bool WriteUndoDataForBlock(const CBlockUndo& blockundo, BlockValidationState& state, CBlockIndex* pindex, const CChainParams& chainparams)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
+    /** Store block on disk. If dbp is not nullptr, then it provides the known position of the block within a block file on disk. */
     FlatFilePos SaveBlockToDisk(const CBlock& block, int nHeight, CChain& active_chain, const CChainParams& chainparams, const FlatFilePos* dbp);
+
+    /** Whether running in -prune mode. */
+    [[nodiscard]] bool IsPruneMode() const { return fPruneMode; }
+
+    /** Attempt to stay below this number of bytes of block files. */
+    [[nodiscard]] uint64_t GetPruneTarget() const { return nPruneTarget; }
+
+    [[nodiscard]] bool LoadingBlocks() const
+    {
+        return fImporting || fReindex;
+    }
 
     /** Calculate the amount of disk space the block & undo files currently use */
     uint64_t CalculateCurrentUsage();
@@ -211,7 +222,7 @@ bool ReadRawBlockFromDisk(std::vector<uint8_t>& block, const FlatFilePos& pos, c
 
 bool UndoReadFromDisk(CBlockUndo& blockundo, const CBlockIndex* pindex);
 
-void ThreadImport(ChainstateManager& chainman, std::vector<fs::path> vImportFiles, const ArgsManager& args);
+void ThreadImport(ChainstateManager& chainman, std::vector<fs::path> vImportFiles, const ArgsManager& args, const fs::path& mempool_path);
 } // namespace node
 
 #endif // BITCOIN_NODE_BLOCKSTORAGE_H

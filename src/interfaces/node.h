@@ -1,4 +1,4 @@
-// Copyright (c) 2018-2021 The Bitcoin Core developers
+// Copyright (c) 2018-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -177,11 +177,8 @@ public:
     //! Is initial block download.
     virtual bool isInitialBlockDownload() = 0;
 
-    //! Get reindex.
-    virtual bool getReindex() = 0;
-
-    //! Get importing.
-    virtual bool getImporting() = 0;
+    //! Is loading blocks.
+    virtual bool isLoadingBlocks() = 0;
 
     //! Set network active.
     virtual void setNetworkActive(bool active) = 0;
@@ -260,7 +257,7 @@ public:
 
     //! Register handler for header tip messages.
     using NotifyHeaderTipFn =
-        std::function<void(SynchronizationState, interfaces::BlockTip tip, double verification_progress)>;
+        std::function<void(SynchronizationState, interfaces::BlockTip tip, bool presync)>;
     virtual std::unique_ptr<Handler> handleNotifyHeaderTip(NotifyHeaderTipFn fn) = 0;
 
     //! Get and set internal node context. Useful for testing, but not

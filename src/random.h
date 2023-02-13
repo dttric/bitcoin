@@ -1,5 +1,5 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2020 The Bitcoin Core developers
+// Copyright (c) 2009-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -11,9 +11,11 @@
 #include <span.h>
 #include <uint256.h>
 
+#include <cassert>
 #include <chrono>
 #include <cstdint>
 #include <limits>
+#include <vector>
 
 /**
  * Overall design of the RNG and entropy sources.
@@ -199,7 +201,7 @@ public:
             return rand64() >> (64 - bits);
         } else {
             if (bitbuf_size < bits) FillBitBuffer();
-            uint64_t ret = bitbuf & (~(uint64_t)0 >> (64 - bits));
+            uint64_t ret = bitbuf & (~uint64_t{0} >> (64 - bits));
             bitbuf >>= bits;
             bitbuf_size -= bits;
             return ret;
@@ -236,14 +238,20 @@ public:
     template <typename Tp>
     Tp rand_uniform_delay(const Tp& time, typename Tp::duration range)
     {
-        using Dur = typename Tp::duration;
-        Dur dur{range.count() > 0 ? /* interval [0..range) */ Dur{randrange(range.count())} :
-                range.count() < 0 ? /* interval (range..0] */ -Dur{randrange(-range.count())} :
-                                    /* interval [0..0] */ Dur{0}};
-        return time + dur;
+        return time + rand_uniform_duration<Tp>(range);
     }
 
-    // Compatibility with the C++11 UniformRandomBitGenerator concept
+    /** Generate a uniform random duration in the range from 0 (inclusive) to range (exclusive). */
+    template <typename Chrono>
+    typename Chrono::duration rand_uniform_duration(typename Chrono::duration range) noexcept
+    {
+        using Dur = typename Chrono::duration;
+        return range.count() > 0 ? /* interval [0..range) */ Dur{randrange(range.count())} :
+               range.count() < 0 ? /* interval (range..0] */ -Dur{randrange(-range.count())} :
+                                   /* interval [0..0] */ Dur{0};
+    };
+
+    // Compatibility with the UniformRandomBitGenerator concept
     typedef uint64_t result_type;
     static constexpr uint64_t min() { return 0; }
     static constexpr uint64_t max() { return std::numeric_limits<uint64_t>::max(); }

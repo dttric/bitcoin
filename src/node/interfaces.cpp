@@ -1,18 +1,22 @@
-// Copyright (c) 2018-2021 The Bitcoin Core developers
+// Copyright (c) 2018-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <addrdb.h>
 #include <banman.h>
+#include <blockfilter.h>
 #include <chain.h>
 #include <chainparams.h>
 #include <deploymentstatus.h>
 #include <external_signer.h>
+#include <index/blockfilterindex.h>
 #include <init.h>
 #include <interfaces/chain.h>
 #include <interfaces/handler.h>
 #include <interfaces/node.h>
 #include <interfaces/wallet.h>
+#include <kernel/chain.h>
+#include <kernel/mempool_entry.h>
 #include <mapport.h>
 #include <net.h>
 #include <net_processing.h>
@@ -21,8 +25,8 @@
 #include <node/blockstorage.h>
 #include <node/coin.h>
 #include <node/context.h>
-#include <node/transaction.h>
 #include <node/interface_ui.h>
+#include <node/transaction.h>
 #include <policy/feerate.h>
 #include <policy/fees.h>
 #include <policy/policy.h>
@@ -35,7 +39,6 @@
 #include <shutdown.h>
 #include <support/allocators/secure.h>
 #include <sync.h>
-#include <timedata.h>
 #include <txmempool.h>
 #include <uint256.h>
 #include <univalue.h>
@@ -61,11 +64,13 @@ using interfaces::BlockTip;
 using interfaces::Chain;
 using interfaces::FoundBlock;
 using interfaces::Handler;
-using interfaces::MakeHandler;
+using interfaces::MakeSignalHandler;
 using interfaces::Node;
 using interfaces::WalletLoader;
 
 namespace node {
+// All members of the classes in this namespace are intentionally public, as the
+// classes themselves are private.
 namespace {
 #ifdef ENABLE_EXTERNAL_SIGNER
 class ExternalSignerImpl : public interfaces::ExternalSigner
@@ -73,15 +78,12 @@ class ExternalSignerImpl : public interfaces::ExternalSigner
 public:
     ExternalSignerImpl(::ExternalSigner signer) : m_signer(std::move(signer)) {}
     std::string getName() override { return m_signer.m_name; }
-private:
     ::ExternalSigner m_signer;
 };
 #endif
 
 class NodeImpl : public Node
 {
-private:
-    ChainstateManager& chainman() { return *Assert(m_context->chainman); }
 public:
     explicit NodeImpl(NodeContext& context) { setContext(&context); }
     void initLogging() override { InitLogging(*Assert(m_context->args)); }
@@ -288,18 +290,12 @@ public:
     }
     double getVerificationProgress() override
     {
-        const CBlockIndex* tip;
-        {
-            LOCK(::cs_main);
-            tip = chainman().ActiveChain().Tip();
-        }
-        return GuessVerificationProgress(chainman().GetParams().TxData(), tip);
+        return GuessVerificationProgress(chainman().GetParams().TxData(), WITH_LOCK(::cs_main, return chainman().ActiveChain().Tip()));
     }
     bool isInitialBlockDownload() override {
         return chainman().ActiveChainstate().IsInitialBlockDownload();
     }
-    bool getReindex() override { return node::fReindex; }
-    bool getImporting() override { return node::fImporting; }
+    bool isLoadingBlocks() override { return node::fReindex || node::fImporting; }
     void setNetworkActive(bool active) override
     {
         if (m_context->connman) {
@@ -307,7 +303,11 @@ public:
         }
     }
     bool getNetworkActive() override { return m_context->connman && m_context->connman->GetNetworkActive(); }
-    CFeeRate getDustRelayFee() override { return ::dustRelayFee; }
+    CFeeRate getDustRelayFee() override
+    {
+        if (!m_context->mempool) return CFeeRate{DUST_RELAY_TX_FEE};
+        return m_context->mempool->m_dust_relay_feerate;
+    }
     UniValue executeRpc(const std::string& command, const UniValue& params, const std::string& uri) override
     {
         JSONRPCRequest req;
@@ -335,53 +335,52 @@ public:
     }
     std::unique_ptr<Handler> handleInitMessage(InitMessageFn fn) override
     {
-        return MakeHandler(::uiInterface.InitMessage_connect(fn));
+        return MakeSignalHandler(::uiInterface.InitMessage_connect(fn));
     }
     std::unique_ptr<Handler> handleMessageBox(MessageBoxFn fn) override
     {
-        return MakeHandler(::uiInterface.ThreadSafeMessageBox_connect(fn));
+        return MakeSignalHandler(::uiInterface.ThreadSafeMessageBox_connect(fn));
     }
     std::unique_ptr<Handler> handleQuestion(QuestionFn fn) override
     {
-        return MakeHandler(::uiInterface.ThreadSafeQuestion_connect(fn));
+        return MakeSignalHandler(::uiInterface.ThreadSafeQuestion_connect(fn));
     }
     std::unique_ptr<Handler> handleShowProgress(ShowProgressFn fn) override
     {
-        return MakeHandler(::uiInterface.ShowProgress_connect(fn));
+        return MakeSignalHandler(::uiInterface.ShowProgress_connect(fn));
     }
     std::unique_ptr<Handler> handleInitWallet(InitWalletFn fn) override
     {
-        return MakeHandler(::uiInterface.InitWallet_connect(fn));
+        return MakeSignalHandler(::uiInterface.InitWallet_connect(fn));
     }
     std::unique_ptr<Handler> handleNotifyNumConnectionsChanged(NotifyNumConnectionsChangedFn fn) override
     {
-        return MakeHandler(::uiInterface.NotifyNumConnectionsChanged_connect(fn));
+        return MakeSignalHandler(::uiInterface.NotifyNumConnectionsChanged_connect(fn));
     }
     std::unique_ptr<Handler> handleNotifyNetworkActiveChanged(NotifyNetworkActiveChangedFn fn) override
     {
-        return MakeHandler(::uiInterface.NotifyNetworkActiveChanged_connect(fn));
+        return MakeSignalHandler(::uiInterface.NotifyNetworkActiveChanged_connect(fn));
     }
     std::unique_ptr<Handler> handleNotifyAlertChanged(NotifyAlertChangedFn fn) override
     {
-        return MakeHandler(::uiInterface.NotifyAlertChanged_connect(fn));
+        return MakeSignalHandler(::uiInterface.NotifyAlertChanged_connect(fn));
     }
     std::unique_ptr<Handler> handleBannedListChanged(BannedListChangedFn fn) override
     {
-        return MakeHandler(::uiInterface.BannedListChanged_connect(fn));
+        return MakeSignalHandler(::uiInterface.BannedListChanged_connect(fn));
     }
     std::unique_ptr<Handler> handleNotifyBlockTip(NotifyBlockTipFn fn) override
     {
-        return MakeHandler(::uiInterface.NotifyBlockTip_connect([fn](SynchronizationState sync_state, const CBlockIndex* block) {
+        return MakeSignalHandler(::uiInterface.NotifyBlockTip_connect([fn](SynchronizationState sync_state, const CBlockIndex* block) {
             fn(sync_state, BlockTip{block->nHeight, block->GetBlockTime(), block->GetBlockHash()},
                 GuessVerificationProgress(Params().TxData(), block));
         }));
     }
     std::unique_ptr<Handler> handleNotifyHeaderTip(NotifyHeaderTipFn fn) override
     {
-        return MakeHandler(
-            ::uiInterface.NotifyHeaderTip_connect([fn](SynchronizationState sync_state, const CBlockIndex* block) {
-                fn(sync_state, BlockTip{block->nHeight, block->GetBlockTime(), block->GetBlockHash()},
-                    /* verification progress is unused when a header was received */ 0);
+        return MakeSignalHandler(
+            ::uiInterface.NotifyHeaderTip_connect([fn](SynchronizationState sync_state, int64_t height, int64_t timestamp, bool presync) {
+                fn(sync_state, BlockTip{(int)height, timestamp, uint256{}}, presync);
             }));
     }
     NodeContext* context() override { return m_context; }
@@ -389,6 +388,7 @@ public:
     {
         m_context = context;
     }
+    ChainstateManager& chainman() { return *Assert(m_context->chainman); }
     NodeContext* m_context{nullptr};
 };
 
@@ -401,6 +401,7 @@ bool FillBlock(const CBlockIndex* index, const FoundBlock& block, UniqueLock<Rec
     if (block.m_max_time) *block.m_max_time = index->GetBlockTimeMax();
     if (block.m_mtp_time) *block.m_mtp_time = index->GetMedianTimePast();
     if (block.m_in_active_chain) *block.m_in_active_chain = active[index->nHeight] == index;
+    if (block.m_locator) { *block.m_locator = GetLocator(index); }
     if (block.m_next_block) FillBlock(active[index->nHeight] == index ? active[index->nHeight + 1] : nullptr, *block.m_next_block, lock, active);
     if (block.m_data) {
         REVERSE_LOCK(lock);
@@ -418,19 +419,19 @@ public:
     virtual ~NotificationsProxy() = default;
     void TransactionAddedToMempool(const CTransactionRef& tx, uint64_t mempool_sequence) override
     {
-        m_notifications->transactionAddedToMempool(tx, mempool_sequence);
+        m_notifications->transactionAddedToMempool(tx);
     }
     void TransactionRemovedFromMempool(const CTransactionRef& tx, MemPoolRemovalReason reason, uint64_t mempool_sequence) override
     {
-        m_notifications->transactionRemovedFromMempool(tx, reason, mempool_sequence);
+        m_notifications->transactionRemovedFromMempool(tx, reason);
     }
     void BlockConnected(const std::shared_ptr<const CBlock>& block, const CBlockIndex* index) override
     {
-        m_notifications->blockConnected(*block, index->nHeight);
+        m_notifications->blockConnected(kernel::MakeBlockInfo(index, block.get()));
     }
     void BlockDisconnected(const std::shared_ptr<const CBlock>& block, const CBlockIndex* index) override
     {
-        m_notifications->blockDisconnected(*block, index->nHeight);
+        m_notifications->blockDisconnected(kernel::MakeBlockInfo(index, block.get()));
     }
     void UpdatedBlockTip(const CBlockIndex* index, const CBlockIndex* fork_index, bool is_ibd) override
     {
@@ -500,67 +501,73 @@ public:
 
 class ChainImpl : public Chain
 {
-private:
-    ChainstateManager& chainman() { return *Assert(m_node.chainman); }
 public:
     explicit ChainImpl(NodeContext& node) : m_node(node) {}
     std::optional<int> getHeight() override
     {
-        LOCK(::cs_main);
-        const CChain& active = Assert(m_node.chainman)->ActiveChain();
-        int height = active.Height();
-        if (height >= 0) {
-            return height;
-        }
-        return std::nullopt;
+        const int height{WITH_LOCK(::cs_main, return chainman().ActiveChain().Height())};
+        return height >= 0 ? std::optional{height} : std::nullopt;
     }
     uint256 getBlockHash(int height) override
     {
         LOCK(::cs_main);
-        const CChain& active = Assert(m_node.chainman)->ActiveChain();
-        CBlockIndex* block = active[height];
-        assert(block);
-        return block->GetBlockHash();
+        return Assert(chainman().ActiveChain()[height])->GetBlockHash();
     }
     bool haveBlockOnDisk(int height) override
     {
-        LOCK(cs_main);
-        const CChain& active = Assert(m_node.chainman)->ActiveChain();
-        CBlockIndex* block = active[height];
+        LOCK(::cs_main);
+        const CBlockIndex* block{chainman().ActiveChain()[height]};
         return block && ((block->nStatus & BLOCK_HAVE_DATA) != 0) && block->nTx > 0;
     }
     CBlockLocator getTipLocator() override
     {
-        LOCK(cs_main);
-        const CChain& active = Assert(m_node.chainman)->ActiveChain();
-        return active.GetLocator();
+        LOCK(::cs_main);
+        return chainman().ActiveChain().GetLocator();
+    }
+    CBlockLocator getActiveChainLocator(const uint256& block_hash) override
+    {
+        LOCK(::cs_main);
+        const CBlockIndex* index = chainman().m_blockman.LookupBlockIndex(block_hash);
+        return GetLocator(index);
     }
     std::optional<int> findLocatorFork(const CBlockLocator& locator) override
     {
-        LOCK(cs_main);
-        const CChainState& active = Assert(m_node.chainman)->ActiveChainstate();
-        if (const CBlockIndex* fork = active.FindForkInGlobalIndex(locator)) {
+        LOCK(::cs_main);
+        if (const CBlockIndex* fork = chainman().ActiveChainstate().FindForkInGlobalIndex(locator)) {
             return fork->nHeight;
         }
         return std::nullopt;
     }
+    bool hasBlockFilterIndex(BlockFilterType filter_type) override
+    {
+        return GetBlockFilterIndex(filter_type) != nullptr;
+    }
+    std::optional<bool> blockFilterMatchesAny(BlockFilterType filter_type, const uint256& block_hash, const GCSFilter::ElementSet& filter_set) override
+    {
+        const BlockFilterIndex* block_filter_index{GetBlockFilterIndex(filter_type)};
+        if (!block_filter_index) return std::nullopt;
+
+        BlockFilter filter;
+        const CBlockIndex* index{WITH_LOCK(::cs_main, return chainman().m_blockman.LookupBlockIndex(block_hash))};
+        if (index == nullptr || !block_filter_index->LookupFilter(index, filter)) return std::nullopt;
+        return filter.GetFilter().MatchAny(filter_set);
+    }
     bool findBlock(const uint256& hash, const FoundBlock& block) override
     {
         WAIT_LOCK(cs_main, lock);
-        const CChain& active = Assert(m_node.chainman)->ActiveChain();
-        return FillBlock(m_node.chainman->m_blockman.LookupBlockIndex(hash), block, lock, active);
+        return FillBlock(chainman().m_blockman.LookupBlockIndex(hash), block, lock, chainman().ActiveChain());
     }
     bool findFirstBlockWithTimeAndHeight(int64_t min_time, int min_height, const FoundBlock& block) override
     {
         WAIT_LOCK(cs_main, lock);
-        const CChain& active = Assert(m_node.chainman)->ActiveChain();
+        const CChain& active = chainman().ActiveChain();
         return FillBlock(active.FindEarliestAtLeast(min_time, min_height), block, lock, active);
     }
     bool findAncestorByHeight(const uint256& block_hash, int ancestor_height, const FoundBlock& ancestor_out) override
     {
         WAIT_LOCK(cs_main, lock);
-        const CChain& active = Assert(m_node.chainman)->ActiveChain();
-        if (const CBlockIndex* block = m_node.chainman->m_blockman.LookupBlockIndex(block_hash)) {
+        const CChain& active = chainman().ActiveChain();
+        if (const CBlockIndex* block = chainman().m_blockman.LookupBlockIndex(block_hash)) {
             if (const CBlockIndex* ancestor = block->GetAncestor(ancestor_height)) {
                 return FillBlock(ancestor, ancestor_out, lock, active);
             }
@@ -570,18 +577,17 @@ public:
     bool findAncestorByHash(const uint256& block_hash, const uint256& ancestor_hash, const FoundBlock& ancestor_out) override
     {
         WAIT_LOCK(cs_main, lock);
-        const CChain& active = Assert(m_node.chainman)->ActiveChain();
-        const CBlockIndex* block = m_node.chainman->m_blockman.LookupBlockIndex(block_hash);
-        const CBlockIndex* ancestor = m_node.chainman->m_blockman.LookupBlockIndex(ancestor_hash);
+        const CBlockIndex* block = chainman().m_blockman.LookupBlockIndex(block_hash);
+        const CBlockIndex* ancestor = chainman().m_blockman.LookupBlockIndex(ancestor_hash);
         if (block && ancestor && block->GetAncestor(ancestor->nHeight) != ancestor) ancestor = nullptr;
-        return FillBlock(ancestor, ancestor_out, lock, active);
+        return FillBlock(ancestor, ancestor_out, lock, chainman().ActiveChain());
     }
     bool findCommonAncestor(const uint256& block_hash1, const uint256& block_hash2, const FoundBlock& ancestor_out, const FoundBlock& block1_out, const FoundBlock& block2_out) override
     {
         WAIT_LOCK(cs_main, lock);
-        const CChain& active = Assert(m_node.chainman)->ActiveChain();
-        const CBlockIndex* block1 = m_node.chainman->m_blockman.LookupBlockIndex(block_hash1);
-        const CBlockIndex* block2 = m_node.chainman->m_blockman.LookupBlockIndex(block_hash2);
+        const CChain& active = chainman().ActiveChain();
+        const CBlockIndex* block1 = chainman().m_blockman.LookupBlockIndex(block_hash1);
+        const CBlockIndex* block2 = chainman().m_blockman.LookupBlockIndex(block_hash2);
         const CBlockIndex* ancestor = block1 && block2 ? LastCommonAncestor(block1, block2) : nullptr;
         // Using & instead of && below to avoid short circuiting and leaving
         // output uninitialized. Cast bool to int to avoid -Wbitwise-instead-of-logical
@@ -593,7 +599,7 @@ public:
     void findCoins(std::map<COutPoint, Coin>& coins) override { return FindCoins(m_node, coins); }
     double guessVerificationProgress(const uint256& block_hash) override
     {
-        LOCK(cs_main);
+        LOCK(::cs_main);
         return GuessVerificationProgress(chainman().GetParams().TxData(), chainman().m_blockman.LookupBlockIndex(block_hash));
     }
     bool hasBlocks(const uint256& block_hash, int min_height, std::optional<int> max_height) override
@@ -665,13 +671,9 @@ public:
         if (!m_node.mempool) return true;
         LockPoints lp;
         CTxMemPoolEntry entry(tx, 0, 0, 0, false, 0, lp);
-        CTxMemPool::setEntries ancestors;
         const CTxMemPool::Limits& limits{m_node.mempool->m_limits};
-        std::string unused_error_string;
         LOCK(m_node.mempool->cs);
-        return m_node.mempool->CalculateMemPoolAncestors(
-            entry, ancestors, limits.ancestor_count, limits.ancestor_size_vbytes,
-            limits.descendant_count, limits.descendant_size_vbytes, unused_error_string);
+        return m_node.mempool->CalculateMemPoolAncestors(entry, limits).has_value();
     }
     CFeeRate estimateSmartFee(int num_blocks, bool conservative, FeeCalculation* calc) override
     {
@@ -688,16 +690,29 @@ public:
         if (!m_node.mempool) return {};
         return m_node.mempool->GetMinFee();
     }
-    CFeeRate relayMinFee() override { return ::minRelayTxFee; }
-    CFeeRate relayIncrementalFee() override { return ::incrementalRelayFee; }
-    CFeeRate relayDustFee() override { return ::dustRelayFee; }
+    CFeeRate relayMinFee() override
+    {
+        if (!m_node.mempool) return CFeeRate{DEFAULT_MIN_RELAY_TX_FEE};
+        return m_node.mempool->m_min_relay_feerate;
+    }
+    CFeeRate relayIncrementalFee() override
+    {
+        if (!m_node.mempool) return CFeeRate{DEFAULT_INCREMENTAL_RELAY_FEE};
+        return m_node.mempool->m_incremental_relay_feerate;
+    }
+    CFeeRate relayDustFee() override
+    {
+        if (!m_node.mempool) return CFeeRate{DUST_RELAY_TX_FEE};
+        return m_node.mempool->m_dust_relay_feerate;
+    }
     bool havePruned() override
     {
-        LOCK(cs_main);
-        return m_node.chainman->m_blockman.m_have_pruned;
+        LOCK(::cs_main);
+        return chainman().m_blockman.m_have_pruned;
     }
-    bool isReadyToBroadcast() override { return !node::fImporting && !node::fReindex && !isInitialBlockDownload(); }
-    bool isInitialBlockDownload() override {
+    bool isReadyToBroadcast() override { return !chainman().m_blockman.LoadingBlocks() && !isInitialBlockDownload(); }
+    bool isInitialBlockDownload() override
+    {
         return chainman().ActiveChainstate().IsInitialBlockDownload();
     }
     bool shutdownRequested() override { return ShutdownRequested(); }
@@ -714,11 +729,7 @@ public:
     }
     void waitForNotificationsIfTipChanged(const uint256& old_tip) override
     {
-        if (!old_tip.IsNull()) {
-            LOCK(::cs_main);
-            const CChain& active = Assert(m_node.chainman)->ActiveChain();
-            if (old_tip == active.Tip()->GetBlockHash()) return;
-        }
+        if (!old_tip.IsNull() && old_tip == WITH_LOCK(::cs_main, return chainman().ActiveChain().Tip()->GetBlockHash())) return;
         SyncWithValidationInterfaceQueue();
     }
     std::unique_ptr<Handler> handleRpc(const CRPCCommand& command) override
@@ -765,9 +776,16 @@ public:
         if (!m_node.mempool) return;
         LOCK2(::cs_main, m_node.mempool->cs);
         for (const CTxMemPoolEntry& entry : m_node.mempool->mapTx) {
-            notifications.transactionAddedToMempool(entry.GetSharedTx(), 0 /* mempool_sequence */);
+            notifications.transactionAddedToMempool(entry.GetSharedTx());
         }
     }
+    bool hasAssumedValidChain() override
+    {
+        return chainman().IsSnapshotActive();
+    }
+
+    NodeContext* context() override { return &m_node; }
+    ChainstateManager& chainman() { return *Assert(m_node.chainman); }
     NodeContext& m_node;
 };
 } // namespace

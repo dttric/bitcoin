@@ -1,22 +1,9 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2021 The Bitcoin Core developers
+// Copyright (c) 2009-2022 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <util/system.h>
-
-#ifdef ENABLE_EXTERNAL_SIGNER
-#if defined(__GNUC__)
-// Boost 1.78 requires the following workaround.
-// See: https://github.com/boostorg/process/issues/235
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wnarrowing"
-#endif
-#include <boost/process.hpp>
-#if defined(__GNUC__)
-#pragma GCC diagnostic pop
-#endif
-#endif // ENABLE_EXTERNAL_SIGNER
 
 #include <chainparamsbase.h>
 #include <fs.h>
@@ -255,7 +242,7 @@ static std::optional<util::SettingsValue> InterpretValue(const KeyInfo& key, con
 ArgsManager::ArgsManager() = default;
 ArgsManager::~ArgsManager() = default;
 
-const std::set<std::string> ArgsManager::GetUnsuitableSectionOnlyArgs() const
+std::set<std::string> ArgsManager::GetUnsuitableSectionOnlyArgs() const
 {
     std::set<std::string> unsuitables;
 
@@ -275,7 +262,7 @@ const std::set<std::string> ArgsManager::GetUnsuitableSectionOnlyArgs() const
     return unsuitables;
 }
 
-const std::list<SectionInfo> ArgsManager::GetUnrecognizedSections() const
+std::list<SectionInfo> ArgsManager::GetUnrecognizedSections() const
 {
     // Section names to be recognized in the config file.
     static const std::set<std::string> available_sections{
@@ -522,7 +509,7 @@ bool ArgsManager::InitSettings(std::string& error)
 
 bool ArgsManager::GetSettingsPath(fs::path* filepath, bool temp, bool backup) const
 {
-    fs::path settings = GetPathArg("-settings", fs::path{BITCOIN_SETTINGS_FILENAME});
+    fs::path settings = GetPathArg("-settings", BITCOIN_SETTINGS_FILENAME);
     if (settings.empty()) {
         return false;
     }
@@ -740,7 +727,7 @@ std::string ArgsManager::GetHelpMessage() const
 {
     const bool show_debug = GetBoolArg("-help-debug", false);
 
-    std::string usage = "";
+    std::string usage;
     LOCK(cs_args);
     for (const auto& arg_map : m_available_args) {
         switch(arg_map.first) {
@@ -831,7 +818,7 @@ std::string HelpMessageOpt(const std::string &option, const std::string &message
            std::string("\n\n");
 }
 
-static std::string FormatException(const std::exception* pex, const char* pszThread)
+static std::string FormatException(const std::exception* pex, std::string_view thread_name)
 {
 #ifdef WIN32
     char pszModule[MAX_PATH] = "";
@@ -841,15 +828,15 @@ static std::string FormatException(const std::exception* pex, const char* pszThr
 #endif
     if (pex)
         return strprintf(
-            "EXCEPTION: %s       \n%s       \n%s in %s       \n", typeid(*pex).name(), pex->what(), pszModule, pszThread);
+            "EXCEPTION: %s       \n%s       \n%s in %s       \n", typeid(*pex).name(), pex->what(), pszModule, thread_name);
     else
         return strprintf(
-            "UNKNOWN EXCEPTION       \n%s in %s       \n", pszModule, pszThread);
+            "UNKNOWN EXCEPTION       \n%s in %s       \n", pszModule, thread_name);
 }
 
-void PrintExceptionContinue(const std::exception* pex, const char* pszThread)
+void PrintExceptionContinue(const std::exception* pex, std::string_view thread_name)
 {
-    std::string message = FormatException(pex, pszThread);
+    std::string message = FormatException(pex, thread_name);
     LogPrintf("\n\n************************\n%s\n", message);
     tfm::format(std::cerr, "\n\n************************\n%s\n", message);
 }
@@ -885,9 +872,9 @@ bool CheckDataDirOption()
     return datadir.empty() || fs::is_directory(fs::absolute(datadir));
 }
 
-fs::path GetConfigFile(const std::string& confPath)
+fs::path GetConfigFile(const fs::path& configuration_file_path)
 {
-    return AbsPathForConfigVal(fs::PathFromString(confPath), false);
+    return AbsPathForConfigVal(configuration_file_path, /*net_specific=*/false);
 }
 
 static bool GetConfigOptions(std::istream& stream, const std::string& filepath, std::string& error, std::vector<std::pair<std::string, std::string>>& options, std::list<SectionInfo>& sections)
@@ -935,6 +922,20 @@ static bool GetConfigOptions(std::istream& stream, const std::string& filepath, 
     return true;
 }
 
+bool IsConfSupported(KeyInfo& key, std::string& error) {
+    if (key.name == "conf") {
+        error = "conf cannot be set in the configuration file; use includeconf= if you want to include additional config files";
+        return false;
+    }
+    if (key.name == "reindex") {
+        // reindex can be set in a config file but it is strongly discouraged as this will cause the node to reindex on
+        // every restart. Allow the config but throw a warning
+        LogPrintf("Warning: reindex=1 is set in the configuration file, which will significantly slow down startup. Consider removing or commenting out this option for better performance, unless there is currently a condition which makes rebuilding the indexes necessary\n");
+        return true;
+    }
+    return true;
+}
+
 bool ArgsManager::ReadConfigStream(std::istream& stream, const std::string& filepath, std::string& error, bool ignore_invalid_keys)
 {
     LOCK(cs_args);
@@ -945,6 +946,7 @@ bool ArgsManager::ReadConfigStream(std::istream& stream, const std::string& file
     for (const std::pair<std::string, std::string>& option : options) {
         KeyInfo key = InterpretKey(option.first);
         std::optional<unsigned int> flags = GetArgFlags('-' + key.name);
+        if (!IsConfSupported(key, error)) return false;
         if (flags) {
             std::optional<util::SettingsValue> value = InterpretValue(key, &option.second, *flags, error);
             if (!value) {
@@ -971,17 +973,17 @@ bool ArgsManager::ReadConfigFiles(std::string& error, bool ignore_invalid_keys)
         m_config_sections.clear();
     }
 
-    const std::string confPath = GetArg("-conf", BITCOIN_CONF_FILENAME);
-    std::ifstream stream{GetConfigFile(confPath)};
+    const fs::path conf_path = GetPathArg("-conf", BITCOIN_CONF_FILENAME);
+    std::ifstream stream{GetConfigFile(conf_path)};
 
     // not ok to have a config file specified that cannot be opened
     if (IsArgSet("-conf") && !stream.good()) {
-        error = strprintf("specified config file \"%s\" could not be opened.", confPath);
+        error = strprintf("specified config file \"%s\" could not be opened.", fs::PathToString(conf_path));
         return false;
     }
     // ok to not have a config file
     if (stream.good()) {
-        if (!ReadConfigStream(stream, confPath, error, ignore_invalid_keys)) {
+        if (!ReadConfigStream(stream, fs::PathToString(conf_path), error, ignore_invalid_keys)) {
             return false;
         }
         // `-includeconf` cannot be included in the command line arguments except
@@ -1019,7 +1021,7 @@ bool ArgsManager::ReadConfigFiles(std::string& error, bool ignore_invalid_keys)
             const size_t default_includes = add_includes({});
 
             for (const std::string& conf_file_name : conf_file_names) {
-                std::ifstream conf_file_stream{GetConfigFile(conf_file_name)};
+                std::ifstream conf_file_stream{GetConfigFile(fs::PathFromString(conf_file_name))};
                 if (conf_file_stream.good()) {
                     if (!ReadConfigStream(conf_file_stream, conf_file_name, error, ignore_invalid_keys)) {
                         return false;
@@ -1332,44 +1334,6 @@ void runCommand(const std::string& strCommand)
 }
 #endif
 
-UniValue RunCommandParseJSON(const std::string& str_command, const std::string& str_std_in)
-{
-#ifdef ENABLE_EXTERNAL_SIGNER
-    namespace bp = boost::process;
-
-    UniValue result_json;
-    bp::opstream stdin_stream;
-    bp::ipstream stdout_stream;
-    bp::ipstream stderr_stream;
-
-    if (str_command.empty()) return UniValue::VNULL;
-
-    bp::child c(
-        str_command,
-        bp::std_out > stdout_stream,
-        bp::std_err > stderr_stream,
-        bp::std_in < stdin_stream
-    );
-    if (!str_std_in.empty()) {
-        stdin_stream << str_std_in << std::endl;
-    }
-    stdin_stream.pipe().close();
-
-    std::string result;
-    std::string error;
-    std::getline(stdout_stream, result);
-    std::getline(stderr_stream, error);
-
-    c.wait();
-    const int n_error = c.exit_code();
-    if (n_error) throw std::runtime_error(strprintf("RunCommandParseJSON error: process(%s) returned %d: %s\n", str_command, n_error, error));
-    if (!result_json.read(result)) throw std::runtime_error("Unable to parse JSON: " + result);
-
-    return result_json;
-#else
-    throw std::runtime_error("Compiled without external signing support (required for external signing).");
-#endif // ENABLE_EXTERNAL_SIGNER
-}
 
 void SetupEnvironment()
 {
@@ -1395,6 +1359,11 @@ void SetupEnvironment()
     // Set the default input/output charset is utf-8
     SetConsoleCP(CP_UTF8);
     SetConsoleOutputCP(CP_UTF8);
+#endif
+
+#ifndef WIN32
+    constexpr mode_t private_umask = 0077;
+    umask(private_umask);
 #endif
 }
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2017-2021 The Bitcoin Core developers
+# Copyright (c) 2017-2022 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test logic for setting nMinimumChainWork on command line.
@@ -82,7 +82,7 @@ class MinimumChainWorkTest(BitcoinTestFramework):
         msg.hashstop = 0
         peer.send_and_ping(msg)
         time.sleep(5)
-        assert "headers" not in peer.last_message
+        assert "headers" not in peer.last_message or len(peer.last_message["headers"].headers) == 0
 
         self.log.info("Generating one more block")
         self.generate(self.nodes[0], 1)

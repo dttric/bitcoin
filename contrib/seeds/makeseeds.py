@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2013-2020 The Bitcoin Core developers
+# Copyright (c) 2013-2022 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 #
@@ -7,10 +7,10 @@
 #
 
 import argparse
+import collections
 import ipaddress
 import re
 import sys
-import collections
 from typing import List, Dict, Union
 
 from asmap import ASMap, net_to_prefix
@@ -38,7 +38,8 @@ PATTERN_AGENT = re.compile(
     r"0.20.(0|1|2|99)|"
     r"0.21.(0|1|2|99)|"
     r"22.(0|99)|"
-    r"23.99"
+    r"23.(0|99)|"
+    r"24.99"
     r")")
 
 def parseline(line: str) -> Union[dict, None]:
@@ -172,6 +173,7 @@ def ip_stats(ips: List[Dict]) -> str:
 def parse_args():
     argparser = argparse.ArgumentParser(description='Generate a list of bitcoin node seed ip addresses.')
     argparser.add_argument("-a","--asmap", help='the location of the asmap asn database file (required)', required=True)
+    argparser.add_argument("-s","--seeds", help='the location of the DNS seeds file (required)', required=True)
     return argparser.parse_args()
 
 def main():
@@ -183,7 +185,8 @@ def main():
     print('Done.', file=sys.stderr)
 
     print('Loading and parsing DNS seeds…', end='', file=sys.stderr, flush=True)
-    lines = sys.stdin.readlines()
+    with open(args.seeds, 'r', encoding='utf8') as f:
+        lines = f.readlines()
     ips = [parseline(line) for line in lines]
     print('Done.', file=sys.stderr)
 
